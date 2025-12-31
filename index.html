@@ -1045,13 +1045,8 @@
                         // Update progress
                         progressFill.style.width = `${((i) / selectedFiles.length) * 100}%`;
                         
-                        // Create unique filename
-                        const timestamp = Date.now();
-                        const fileExt = file.name.split('.').pop();
-                        const safeName = file.name
-                            .replace(/[^a-zA-Z0-9._-]/g, '_')
-                            .replace(/\s+/g, '_');
-                        const fileName = `${timestamp}_${safeName}`;
+                        // Create unique filename using sequential prefix (01,02,...) stored in localStorage
+                        const fileName = await tryGenerateUniqueFileName(file, username, repo, token, 10);
                         
                         // Convert file to base64
                         const base64Content = await fileToBase64(file);
@@ -1274,6 +1269,79 @@
                 reader.onerror = reject;
                 reader.readAsDataURL(file);
             });
+        }
+
+        // Generate a filename for uploads with a sequential two-digit prefix (01, 02, ...)
+        // Counter is stored in localStorage under 'imageCounter' so it persists across sessions.
+        // Filename format: {prefix}_{timestamp}.{ext}  (e.g., 01_1700000000000.jpg)
+        function generateFileName(file) {
+            try {
+                let counter = parseInt(localStorage.getItem('imageCounter') || '0', 10) || 0;
+                counter += 1;
+                localStorage.setItem('imageCounter', String(counter));
+                const prefix = String(counter).padStart(2, '0'); // e.g., 01, 02
+
+                const timestamp = Date.now();
+                const parts = file.name.split('.');
+                const ext = parts.length > 1 ? parts.pop().toLowerCase() : '';
+
+                return ext ? `${prefix}_${timestamp}.${ext}` : `${prefix}_${timestamp}`;
+            } catch (e) {
+                // Fallback to timestamp only
+                const ts = Date.now();
+                return `${ts}`;
+            }
+        }
+
+        // Try to generate a unique filename by checking the repo for collisions.
+        // Attempts to reserve the next counters up to `maxAttempts`. If a unique
+        // name is found, the counter in localStorage is updated to that value.
+        async function tryGenerateUniqueFileName(file, username, repo, token, maxAttempts = 10) {
+            const extParts = file.name.split('.');
+            const ext = extParts.length > 1 ? extParts.pop().toLowerCase() : '';
+
+            let baseCounter = parseInt(localStorage.getItem('imageCounter') || '0', 10) || 0;
+
+            let collisionDetected = false;
+
+            for (let i = 1; i <= maxAttempts; i++) {
+                const candidateCounter = baseCounter + i;
+                const prefix = String(candidateCounter).padStart(2, '0');
+                const timestamp = Date.now();
+                const candidateName = ext ? `${prefix}_${timestamp}.${ext}` : `${prefix}_${timestamp}`;
+
+                // Check existence via contents API
+                try {
+                    const resp = await fetch(`${GITHUB_API}/repos/${username}/${repo}/contents/images/${encodeURIComponent(candidateName)}`, {
+                        headers: {
+                            'Authorization': `token ${token}`,
+                            'Accept': 'application/vnd.github.v3+json'
+                        }
+                    });
+
+                    if (resp.status === 404) {
+                        // Not found -> reserve this counter and return
+                        localStorage.setItem('imageCounter', String(candidateCounter));
+                        if (collisionDetected) {
+                            showNotification(`Filename collision avoided — using ${candidateName}`, 'info');
+                        }
+                        return candidateName;
+                    }
+
+                    // If resp.ok === true then file exists; mark collision and continue to next candidate
+                    if (resp.ok) {
+                        collisionDetected = true;
+                    }
+                } catch (e) {
+                    // On network or other failures, don't fail immediately — try next
+                    console.warn('Error checking filename collision for', candidateName, e);
+                }
+            }
+
+            // If all attempts failed (very unlikely), fallback to timestamp+random suffix
+            const fallback = `${String(baseCounter + maxAttempts + 1).padStart(2, '0')}_${Date.now()}_${Math.floor(Math.random() * 9000 + 1000)}`;
+            localStorage.setItem('imageCounter', String(baseCounter + maxAttempts + 1));
+            return fallback;
         }
         
         // Format file size
